@@ -289,6 +289,59 @@ class VM: NSObject, VZVirtualMachineDelegate, ObservableObject {
     try await self.virtualMachine.stop()
   }
 
+  static func setupTTY(_ tty_fd: Int32) throws {
+    var tty: termios = termios()
+
+    // set baudrate to 230400
+    tcgetattr(tty_fd, &tty)
+    tty.c_cflag &= ~tcflag_t(PARENB); // Clear parity bit, disabling parity (most common)
+    tty.c_cflag &= ~tcflag_t(CSTOPB); // Clear stop field, only one stop bit used in communication (most common)
+
+    tty.c_cflag &= ~tcflag_t(CSIZE); // Clear all the size bits, then use one of the statements below
+    tty.c_cflag |= tcflag_t(CS8); // 8 bits per byte (most common)
+
+    tty.c_cflag &= ~tcflag_t(CRTSCTS); // Disable RTS/CTS hardware flow control (most common)
+    tty.c_cflag |= tcflag_t(CREAD | CLOCAL); // Turn on READ & ignore ctrl lines (CLOCAL = 1)
+    tty.c_lflag &= ~tcflag_t(ICANON); // disable input cannonical mode
+    tty.c_lflag &= ~tcflag_t(ECHO); // Disable echo
+    tty.c_lflag &= ~tcflag_t(ECHOE); // Disable erasure
+    tty.c_lflag &= ~tcflag_t(ECHONL); // Disable new-line echo
+
+    tty.c_lflag &= ~tcflag_t(ISIG); // Disable interpretation of INTR, QUIT and SUSP
+
+    tty.c_iflag &= ~tcflag_t(IXON | IXOFF | IXANY); // Turn off s/w flow ctrl
+    tty.c_iflag &= ~tcflag_t(IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL); // Disable any special handling of received bytes
+
+    tty.c_oflag &= ~tcflag_t(OPOST); // Prevent special interpretation of output bytes (e.g. newline chars)
+    tty.c_oflag &= ~tcflag_t(ONLCR); // Prevent conversion of newline to carriage return/line feed
+
+    cfsetispeed(&tty, speed_t(B230400))
+    cfsetospeed(&tty, speed_t(B230400))
+    if (tcsetattr(tty_fd, TCSANOW, &tty) != 0) {
+      throw RuntimeError.VMConfigurationError("Failed to create console PTY, tcsetattr error=\(errno)")
+    }
+  }
+
+  static func createConsolePTY() throws -> (String, Int32) {
+    var tty_fd: Int32 = -1
+    var sfd: Int32 = -1
+    let tty_path = UnsafeMutablePointer<CChar>.allocate(capacity: 1024)
+
+    if (openpty(&tty_fd, &sfd, tty_path, nil, nil) < 0) {
+      throw RuntimeError.VMConfigurationError("Failed to create console PTY, openpty error=\(errno)")
+    }
+
+    // set baudrate to 230400
+    try setupTTY(tty_fd)
+    try setupTTY(sfd)
+
+    let path = String(cString: tty_path)
+
+    tty_path.deallocate()
+
+    return (path, tty_fd)
+  }
+
   static func craftConfiguration(
     diskURL: URL,
     nvramURL: URL,
@@ -395,17 +448,18 @@ class VM: NSObject, VZVirtualMachineDelegate, ObservableObject {
     // A console device useful for implementing
     // host feature checks in the guest agent software.
     if !suspendable {
-      let consoleURL: URL = URL(fileURLWithPath: "tart-agent.sock", isDirectory: false, relativeTo: diskURL).absoluteURL
+      let pty = try Self.createConsolePTY()
+      let consolePTY = URL(fileURLWithPath: "tart-agent.pty", isDirectory: false, relativeTo: diskURL).absoluteURL.path()
       let consolePort = VZVirtioConsolePortConfiguration()
+      let consoleDevice = VZVirtioConsoleDeviceConfiguration()
 
-      if FileManager.default.fileExists(atPath: consoleURL.absoluteURL.path()) == false {
-        FileManager.default.createFile(atPath: consoleURL.absoluteURL.path(), contents: nil)
-      }
+      unlink(consolePTY)
+      symlinkat(pty.0, 0660, consolePTY)
 
       consolePort.name = "tart-agent"
-      consolePort.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: try FileHandle(forReadingFrom: consoleURL), fileHandleForWriting: try FileHandle(forWritingTo: consoleURL))
-      
-      let consoleDevice = VZVirtioConsoleDeviceConfiguration()
+      consolePort.attachment = VZFileHandleSerialPortAttachment(
+              fileHandleForReading: FileHandle(fileDescriptor: pty.1, closeOnDealloc: true),
+              fileHandleForWriting: FileHandle(fileDescriptor: pty.1, closeOnDealloc: true))
       consoleDevice.ports[0] = consolePort
 
       configuration.consoleDevices.append(consoleDevice)
