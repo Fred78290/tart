@@ -395,15 +395,31 @@ class VM: NSObject, VZVirtualMachineDelegate, ObservableObject {
     // A console device useful for implementing
     // host feature checks in the guest agent software.
     if !suspendable {
-      let consoleURL: URL = URL(fileURLWithPath: "tart-agent.sock", isDirectory: false, relativeTo: diskURL).absoluteURL
+      let consolePath = URL(fileURLWithPath: "tart-agent.console", isDirectory: false, relativeTo: diskURL).absoluteURL.path()
       let consolePort = VZVirtioConsolePortConfiguration()
 
-      if FileManager.default.fileExists(atPath: consoleURL.absoluteURL.path()) == false {
-        FileManager.default.createFile(atPath: consoleURL.absoluteURL.path(), contents: nil)
+      if FileManager.default.fileExists(atPath: consolePath) == false {
+        if mkfifo(consolePath, 0o666) < 0 **{
+          throw RuntimeError.VMConfigurationError("Unable to create console \(errno)")
+        }
+      }
+
+      let forWriting: Int32 = open(consolePath, O_WRONLY | O_NONBLOCK)
+
+      if forWriting < 0 {
+        throw RuntimeError.VMConfigurationError("Unable to open console \(errno)")
+      }
+
+      let forReading: Int32 = open(consolePath, O_RDONLY | O_NONBLOCK)
+
+      if forReading < 0 {
+        throw RuntimeError.VMConfigurationError("Unable to open console \(errno)")
       }
 
       consolePort.name = "tart-agent"
-      consolePort.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: try FileHandle(forReadingFrom: consoleURL), fileHandleForWriting: try FileHandle(forWritingTo: consoleURL))
+      consolePort.attachment = VZFileHandleSerialPortAttachment(
+          fileHandleForReading: FileHandle(fileDescriptor: forReading, closeOnDealloc: true),
+          fileHandleForWriting: FileHandle(fileDescriptor: forWriting, closeOnDealloc: true))
       
       let consoleDevice = VZVirtioConsoleDeviceConfiguration()
       consoleDevice.ports[0] = consolePort
