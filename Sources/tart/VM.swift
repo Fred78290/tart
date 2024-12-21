@@ -40,6 +40,8 @@ class VM: NSObject, VZVirtualMachineDelegate, ObservableObject {
 
   var network: Network
 
+  let console: Console?
+
   init(vmDir: VMDirectory,
        network: Network = NetworkShared(),
        additionalStorageDevices: [VZStorageDeviceConfiguration] = [],
@@ -61,7 +63,7 @@ class VM: NSObject, VZVirtualMachineDelegate, ObservableObject {
 
     // Initialize the virtual machine and its configuration
     self.network = network
-    configuration = try Self.craftConfiguration(diskURL: vmDir.diskURL,
+    (configuration, console) = try Self.craftConfiguration(diskURL: vmDir.diskURL,
                                                 nvramURL: vmDir.nvramURL, vmConfig: config,
                                                 network: network, additionalStorageDevices: additionalStorageDevices,
                                                 directorySharingDevices: directorySharingDevices,
@@ -192,7 +194,7 @@ class VM: NSObject, VZVirtualMachineDelegate, ObservableObject {
 
       // Initialize the virtual machine and its configuration
       self.network = network
-      configuration = try Self.craftConfiguration(diskURL: vmDir.diskURL, nvramURL: vmDir.nvramURL,
+      (configuration, console) = try Self.craftConfiguration(diskURL: vmDir.diskURL, nvramURL: vmDir.nvramURL,
                                                   vmConfig: config, network: network,
                                                   additionalStorageDevices: additionalStorageDevices,
                                                   directorySharingDevices: directorySharingDevices,
@@ -265,6 +267,10 @@ class VM: NSObject, VZVirtualMachineDelegate, ObservableObject {
       }
     }
 
+    if let console {
+      console.close()
+    }
+
     try await network.stop()
   }
 
@@ -303,7 +309,7 @@ class VM: NSObject, VZVirtualMachineDelegate, ObservableObject {
     clipboard: Bool = true,
     sync: VZDiskImageSynchronizationMode = .full,
     caching: VZDiskImageCachingMode? = nil
-  ) throws -> VZVirtualMachineConfiguration {
+  ) throws -> (VZVirtualMachineConfiguration, Console?) {
     let configuration = VZVirtualMachineConfiguration()
 
     // Boot loader
@@ -390,23 +396,19 @@ class VM: NSObject, VZVirtualMachineDelegate, ObservableObject {
     // Serial Port
     configuration.serialPorts = serialPorts
 
-    // Version console device
+    var console: Console? = nil
+
+    // Console device
     //
-    // A dummy console device useful for implementing
+    // A console device useful for implementing
     // host feature checks in the guest agent software.
     if !suspendable {
-      let consolePort = VZVirtioConsolePortConfiguration()
-      consolePort.name = "tart-version-\(CI.version)"
-
-      let consoleDevice = VZVirtioConsoleDeviceConfiguration()
-      consoleDevice.ports[0] = consolePort
-
-      configuration.consoleDevices.append(consoleDevice)
+      console = Console.setupConsole(diskURL: diskURL, configuration: configuration)
     }
 
     try configuration.validate()
 
-    return configuration
+    return (configuration, console)
   }
 
   func guestDidStop(_ virtualMachine: VZVirtualMachine) {
